@@ -1,10 +1,10 @@
 """
 Extrator e Classificador de Jurisprudência do INSS — CJF Unificado
 Uso: python main.py [--termos "..."] [--tribunais TRF1 TRF4] [--paginas N]
+     Ou simplesmente: python main.py  (abre menu interativo)
 """
 
 import argparse
-import csv
 import json
 import logging
 import sys
@@ -70,9 +70,7 @@ def _salvar_json(registros: list[dict], caminho: Path) -> None:
 
 # ── Relatório resumo ──────────────────────────────────────────────────────────
 
-def _imprimir_resumo(
-    total: int, n_fav: int, n_desfav: int, output_dir: Path
-) -> None:
+def _imprimir_resumo(total: int, n_fav: int, n_desfav: int, output_dir: Path) -> None:
     print("\n" + "=" * 60)
     print("  RESUMO DA EXTRAÇÃO")
     print("=" * 60)
@@ -80,13 +78,98 @@ def _imprimir_resumo(
     print(f"  Favoráveis ao segurado      : {n_fav}")
     print(f"  Desfavoráveis               : {n_desfav}")
     if total:
-        pct = 100 * n_fav / total
-        print(f"  Taxa de favorabilidade      : {pct:.1f}%")
+        print(f"  Taxa de favorabilidade      : {100 * n_fav / total:.1f}%")
     print(f"\n  Arquivos gerados em: {output_dir.resolve()}")
     print("=" * 60 + "\n")
 
 
-# ── CLI ───────────────────────────────────────────────────────────────────────
+# ── Menu interativo ───────────────────────────────────────────────────────────
+
+_TRIBUNAIS_VALIDOS = ["TRF1", "TRF2", "TRF3", "TRF4", "TRF5", "STJ"]
+
+def _perguntar(pergunta: str, padrao: str = "") -> str:
+    """Exibe uma pergunta e retorna a resposta, ou o padrão se vazio."""
+    dica = f" [{padrao}]" if padrao else ""
+    try:
+        resposta = input(f"{pergunta}{dica}: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        sys.exit(0)
+    return resposta if resposta else padrao
+
+
+def _menu_interativo() -> argparse.Namespace:
+    """Exibe o menu no terminal e coleta os parâmetros do usuário."""
+    print()
+    print("╔══════════════════════════════════════════════════════════╗")
+    print("║   Extrator de Jurisprudência INSS — CJF Unificado        ║")
+    print("╚══════════════════════════════════════════════════════════╝")
+    print()
+
+    # ── Termos de busca ───────────────────────────────────────────────────────
+    print("  Exemplos de termos:")
+    print("    auxílio-doença incapacidade")
+    print("    aposentadoria por invalidez")
+    print("    BPC LOAS benefício assistencial")
+    print("    pensão por morte dependente")
+    print()
+    termos = _perguntar("  Termos de busca", config.TERMOS_BUSCA)
+
+    # ── Tribunais ─────────────────────────────────────────────────────────────
+    print()
+    print(f"  Tribunais disponíveis: {', '.join(_TRIBUNAIS_VALIDOS)}")
+    print("  (deixe em branco para pesquisar em todos)")
+    entrada_tribunais = _perguntar("  Tribunais", "")
+
+    tribunais: list[str] = []
+    if entrada_tribunais:
+        for t in entrada_tribunais.upper().replace(",", " ").split():
+            if t in _TRIBUNAIS_VALIDOS:
+                tribunais.append(t)
+            else:
+                print(f"  ! Tribunal '{t}' não reconhecido — ignorado.")
+
+    # ── Número máximo de páginas ──────────────────────────────────────────────
+    print()
+    paginas_str = _perguntar("  Número máximo de páginas", str(config.MAX_PAGINAS))
+    try:
+        paginas = int(paginas_str)
+        if paginas <= 0:
+            raise ValueError
+    except ValueError:
+        print(f"  ! Valor inválido, usando padrão ({config.MAX_PAGINAS}).")
+        paginas = config.MAX_PAGINAS
+
+    # ── Pasta de saída ────────────────────────────────────────────────────────
+    print()
+    saida = _perguntar("  Pasta de saída", config.OUTPUT_DIR)
+
+    # ── Confirmação ───────────────────────────────────────────────────────────
+    print()
+    print("  ┌─ Configuração ──────────────────────────────────────┐")
+    print(f"  │  Termos   : {termos}")
+    print(f"  │  Tribunais: {', '.join(tribunais) if tribunais else 'todos'}")
+    print(f"  │  Páginas  : {paginas}")
+    print(f"  │  Saída    : {saida}")
+    print("  └────────────────────────────────────────────────────┘")
+    print()
+
+    confirmacao = _perguntar("  Iniciar extração? (s/n)", "s").lower()
+    if confirmacao not in ("s", "sim", "y", "yes", ""):
+        print("  Cancelado.")
+        sys.exit(0)
+
+    print()
+
+    ns = argparse.Namespace()
+    ns.termos = termos
+    ns.tribunais = tribunais
+    ns.paginas = paginas
+    ns.saida = saida
+    return ns
+
+
+# ── CLI (argumentos de linha de comando) ──────────────────────────────────────
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -100,36 +183,33 @@ Exemplos:
   python main.py --paginas 10 --saida meus_resultados
         """,
     )
-    parser.add_argument(
-        "--termos",
-        default=config.TERMOS_BUSCA,
-        help=f'Termos de busca (padrão: "{config.TERMOS_BUSCA}")',
-    )
-    parser.add_argument(
-        "--tribunais",
-        nargs="*",
-        default=config.TRIBUNAIS,
-        metavar="TRIBUNAL",
-        help="Tribunais a filtrar: TRF1 TRF2 TRF3 TRF4 TRF5 STJ (padrão: todos)",
-    )
-    parser.add_argument(
-        "--paginas",
-        type=int,
-        default=config.MAX_PAGINAS,
-        help=f"Número máximo de páginas (padrão: {config.MAX_PAGINAS})",
-    )
-    parser.add_argument(
-        "--saida",
-        default=config.OUTPUT_DIR,
-        help=f'Diretório de saída (padrão: "{config.OUTPUT_DIR}")',
-    )
+    parser.add_argument("--termos", default=None,
+                        help="Termos de busca")
+    parser.add_argument("--tribunais", nargs="*", default=None, metavar="TRIBUNAL",
+                        help="TRF1 TRF2 TRF3 TRF4 TRF5 STJ (padrão: todos)")
+    parser.add_argument("--paginas", type=int, default=None,
+                        help="Número máximo de páginas")
+    parser.add_argument("--saida", default=None,
+                        help="Diretório de saída")
     return parser.parse_args()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    args = _parse_args()
+    cli = _parse_args()
+
+    # Se nenhum argumento foi passado, abre o menu interativo
+    if cli.termos is None and cli.tribunais is None and cli.paginas is None and cli.saida is None:
+        args = _menu_interativo()
+    else:
+        # Preenche valores padrão para argumentos omitidos
+        args = argparse.Namespace(
+            termos=cli.termos or config.TERMOS_BUSCA,
+            tribunais=cli.tribunais or config.TRIBUNAIS,
+            paginas=cli.paginas or config.MAX_PAGINAS,
+            saida=cli.saida or config.OUTPUT_DIR,
+        )
 
     output_dir = Path(args.saida)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -137,14 +217,12 @@ def main() -> None:
     _configurar_log(output_dir)
     log = logging.getLogger(__name__)
 
-    # Sobrescreve config com args da linha de comando
     config.MAX_PAGINAS = args.paginas
 
     log.info("Iniciando extração | Termos: '%s' | Tribunais: %s | Máx. páginas: %d",
              args.termos, args.tribunais or "todos", args.paginas)
 
     extrator = ExtratorCJF()
-
     todas: list[dict] = []
     favoraveis: list[dict] = []
 
@@ -156,27 +234,21 @@ def main() -> None:
 
             if resultado.favoravel:
                 favoraveis.append(registro)
-                log.info(
-                    "[FAVORÁVEL (%s)] %s | %s",
-                    resultado.confianca,
-                    decisao.processo or "s/n",
-                    decisao.tribunal or "s/tribunal",
-                )
+                log.info("[FAVORÁVEL (%s)] %s | %s",
+                         resultado.confianca,
+                         decisao.processo or "s/n",
+                         decisao.tribunal or "s/tribunal")
             else:
-                log.debug(
-                    "[desfavorável] %s | %s",
-                    decisao.processo or "s/n",
-                    decisao.tribunal or "s/tribunal",
-                )
+                log.debug("[desfavorável] %s | %s",
+                          decisao.processo or "s/n",
+                          decisao.tribunal or "s/tribunal")
 
     except KeyboardInterrupt:
         log.warning("Extração interrompida pelo usuário.")
     except Exception as exc:
         log.error("Erro durante a extração: %s", exc, exc_info=True)
         raise
-
     finally:
-        # Salva resultados mesmo se houver erro parcial
         _salvar_csv(todas, output_dir / config.ARQUIVO_TODAS)
         _salvar_csv(favoraveis, output_dir / config.ARQUIVO_FAVORAVEIS)
         _salvar_json(favoraveis, output_dir / config.ARQUIVO_JSON)
