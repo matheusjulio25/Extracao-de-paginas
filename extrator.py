@@ -6,13 +6,16 @@ Realiza a busca, navega pelas páginas e retorna os textos das decisões.
 import logging
 import re
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generator, Optional
 from urllib.parse import urljoin
 
 import requests
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 import config
 
@@ -35,6 +38,8 @@ class ExtratorCJF:
     """
     Extrator para o sistema JSF do CJF Unificado.
     Mantém sessão HTTP e gerencia o ViewState entre requisições.
+    O CJF retorna respostas JSF parciais (XML com HTML em CDATA);
+    _parse_response extrai o HTML interno antes de fazer o parsing.
     """
 
     def __init__(self):
@@ -43,19 +48,71 @@ class ExtratorCJF:
         self._view_state: Optional[str] = None
         self._form_id: Optional[str] = None
 
-    # ── Utilitários internos ──────────────────────────────────────────────────
+    # ── Parsing de resposta (HTML direto ou JSF partial XML) ──────────────────
+
+    def _parse_response(self, text: str) -> BeautifulSoup:
+        """
+        O CJF retorna respostas JSF parciais no formato:
+          <?xml version='1.0'?>
+          <partial-response>
+            <changes>
+              <update id="algumId"><![CDATA[<div>...HTML...</div>]]></update>
+              <update id="javax.faces.ViewState"><![CDATA[viewstate]]></update>
+            </changes>
+          </partial-response>
+
+        Este método extrai o HTML de dentro das tags <update> e também
+        captura o ViewState automaticamente.
+        """
+        stripped = text.strip()
+
+        is_jsf_partial = (
+            stripped.startswith("<?xml")
+            or "<partial-response" in stripped[:500]
+        )
+
+        if is_jsf_partial:
+            try:
+                xml = BeautifulSoup(stripped, "lxml-xml")
+
+                # Captura ViewState embutido no XML
+                for upd in xml.find_all("update"):
+                    if upd.get("id", "") == "javax.faces.ViewState":
+                        self._view_state = upd.get_text(strip=True)
+                        logger.debug("ViewState extraído do XML parcial.")
+
+                # Concatena o HTML de todas as outras tags <update>
+                html_parts = []
+                for upd in xml.find_all("update"):
+                    if upd.get("id", "") != "javax.faces.ViewState":
+                        html_parts.append(upd.get_text())  # conteúdo CDATA
+
+                combined = "\n".join(html_parts)
+                if combined.strip():
+                    logger.debug("Resposta JSF parcial: %d chars de HTML extraídos.", len(combined))
+                    return BeautifulSoup(combined, "lxml")
+                else:
+                    logger.warning("Resposta JSF parcial sem conteúdo HTML nas tags <update>.")
+            except Exception as exc:
+                logger.warning("Falha ao parsear XML parcial: %s. Tentando como HTML.", exc)
+
+        # Resposta HTML normal
+        return BeautifulSoup(stripped, "lxml")
 
     def _get_soup(self, url: str, **kwargs) -> BeautifulSoup:
         resp = self.session.get(url, timeout=30, **kwargs)
         resp.raise_for_status()
-        return BeautifulSoup(resp.text, "lxml")
+        return self._parse_response(resp.text)
 
     def _post_soup(self, url: str, data: dict, **kwargs) -> BeautifulSoup:
         resp = self.session.post(url, data=data, timeout=30, **kwargs)
         resp.raise_for_status()
-        return BeautifulSoup(resp.text, "lxml")
+        return self._parse_response(resp.text)
 
     def _extrair_view_state(self, soup: BeautifulSoup) -> str:
+        # ViewState pode já ter sido capturado do XML parcial
+        if self._view_state:
+            return self._view_state
         tag = soup.find("input", {"name": "javax.faces.ViewState"})
         if not tag:
             raise RuntimeError(
@@ -351,13 +408,19 @@ class ExtratorCJF:
         time.sleep(config.DELAY_REQUISICOES)
         resp = self.session.post(config.SEARCH_URL, data=payload, timeout=30)
         resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
 
-        # Salva HTML da página de resultados para diagnóstico
-        debug_path = Path(config.OUTPUT_DIR) / "debug_pagina_resultados.html"
-        debug_path.parent.mkdir(parents=True, exist_ok=True)
-        debug_path.write_text(resp.text, encoding="utf-8")
-        logger.info("HTML de resultados salvo em: %s", debug_path)
+        # Salva resposta bruta para diagnóstico
+        debug_dir = Path(config.OUTPUT_DIR)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        (debug_dir / "debug_resposta_bruta.xml").write_text(resp.text, encoding="utf-8")
+        logger.info("Resposta bruta salva em: %s/debug_resposta_bruta.xml", debug_dir)
+
+        # Parseia corretamente (HTML direto ou JSF partial XML)
+        soup = self._parse_response(resp.text)
+
+        # Salva HTML extraído para diagnóstico
+        (debug_dir / "debug_html_extraido.html").write_text(str(soup), encoding="utf-8")
+        logger.info("HTML extraído salvo em: %s/debug_html_extraido.html", debug_dir)
 
         pagina = 1
         max_p = config.MAX_PAGINAS or float("inf")
