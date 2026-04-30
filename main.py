@@ -44,9 +44,10 @@ def _decisao_para_dict(r: ResultadoClassificacao) -> dict:
         "confianca": r.confianca,
         "score_favoravel": r.score_favoravel,
         "score_desfavoravel": r.score_desfavoravel,
-        "termos_favoraveis": "; ".join(r.termos_favoraveis_encontrados),
-        "termos_desfavoraveis": "; ".join(r.termos_desfavoraveis_encontrados),
-        "texto_completo": d.texto_completo[:2000],  # trunca para CSV legível
+        "trechos_favoraveis": "; ".join(r.trechos_favoraveis),
+        "trechos_desfavoraveis": "; ".join(r.trechos_desfavoraveis),
+        "dispositivo": r.dispositivo_extraido,
+        "texto_completo": d.texto_completo[:2000],
     }
 
 
