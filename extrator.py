@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Generator, Optional
 from urllib.parse import urljoin
 
@@ -263,46 +264,51 @@ class ExtratorCJF:
     ) -> Optional[dict]:
         """
         Monta o payload para avançar para a próxima página.
-        Suporta links âncora e botões JSF.
+        Suporta links diretos (GET) e botões JSF (POST com ViewState).
         """
-        view_state = self._extrair_view_state(soup)
-
-        # Procura link/botão "próxima página"
         padroes_proximo = re.compile(
-            r"(próxim|proxim|next|>|avançar|avancar|»)", re.I
+            r"(próxim|proxim|next|avançar|avancar|»\s*$|>\s*$)", re.I
         )
 
-        # Links paginação
-        for a in soup.find_all("a", string=padroes_proximo):
+        # ── 1. Links com href direto (não precisam de ViewState) ──────────────
+        for a in soup.find_all("a"):
+            texto = a.get_text(strip=True)
             href = a.get("href", "")
-            if href and not href.startswith("#"):
+            if padroes_proximo.search(texto) and href and not href.startswith("#"):
                 return {"_link": urljoin(config.BASE_URL, href)}
-            # Botão JSF via onclick
-            onclick = a.get("onclick", "")
-            jsf_id = self._extrair_id_jsf(onclick)
-            if jsf_id:
-                return self._payload_jsf_click(jsf_id, view_state)
 
-        # Botões de submit
-        for btn in soup.find_all(["input", "button"]):
-            label = (btn.get("value", "") + " " + btn.get_text()).strip()
-            if padroes_proximo.search(label):
-                name = btn.get("name", "")
-                if name:
-                    payload = {"javax.faces.ViewState": view_state, name: btn.get("value", "")}
-                    return payload
-
-        # Paginação numérica: busca pelo número da próxima página
+        # ── 2. Paginação numérica por href direto ─────────────────────────────
         proxima = str(pagina_atual + 1)
         for a in soup.find_all("a"):
             if a.get_text(strip=True) == proxima:
                 href = a.get("href", "")
                 if href and not href.startswith("#"):
                     return {"_link": urljoin(config.BASE_URL, href)}
+
+        # ── 3. Navegação JSF (precisa de ViewState) ───────────────────────────
+        try:
+            view_state = self._extrair_view_state(soup)
+        except RuntimeError:
+            # Página de resultados não tem ViewState — sem mais páginas via JSF
+            logger.debug("ViewState ausente na página %d; sem paginação JSF.", pagina_atual)
+            view_state = None
+
+        if view_state:
+            # Links com onclick JSF
+            for a in soup.find_all("a"):
+                texto = a.get_text(strip=True)
                 onclick = a.get("onclick", "")
                 jsf_id = self._extrair_id_jsf(onclick)
-                if jsf_id:
+                if jsf_id and (padroes_proximo.search(texto) or texto == proxima):
                     return self._payload_jsf_click(jsf_id, view_state)
+
+            # Botões de submit com label "próximo"
+            for btn in soup.find_all(["input", "button"]):
+                label = (btn.get("value", "") + " " + btn.get_text()).strip()
+                if padroes_proximo.search(label):
+                    name = btn.get("name", "")
+                    if name:
+                        return {"javax.faces.ViewState": view_state, name: btn.get("value", "")}
 
         return None  # Sem próxima página
 
@@ -343,7 +349,15 @@ class ExtratorCJF:
         payload = self._montar_payload_busca(soup, termos, tribunais)
         logger.info("Enviando formulário de busca...")
         time.sleep(config.DELAY_REQUISICOES)
-        soup = self._post_soup(config.SEARCH_URL, data=payload)
+        resp = self.session.post(config.SEARCH_URL, data=payload, timeout=30)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "lxml")
+
+        # Salva HTML da página de resultados para diagnóstico
+        debug_path = Path(config.OUTPUT_DIR) / "debug_pagina_resultados.html"
+        debug_path.parent.mkdir(parents=True, exist_ok=True)
+        debug_path.write_text(resp.text, encoding="utf-8")
+        logger.info("HTML de resultados salvo em: %s", debug_path)
 
         pagina = 1
         max_p = config.MAX_PAGINAS or float("inf")
